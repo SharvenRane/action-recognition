@@ -1,93 +1,90 @@
-# Action Recognition
+# action-recognition
 
-Video action recognition using VideoMAE and SlowFast with temporal modeling
+Recognize actions from short video clips with a small 3D CNN. The idea is the
+plain one: stack a few frames into a clip, run 3D convolutions over time and
+space together, pool the result down to a vector, and read off a class. Because
+the convolutions see several frames at once, the network can pick up on how
+things move rather than how any single frame looks.
 
-`action-recognition` `video` `videomae` `slowfast` `pytorch`
+To keep everything runnable offline with no datasets to download, the clips are
+synthetic. Each clip shows a bright blob drifting across a small frame, and the
+direction or pattern of that drift is what defines the class. A model that reads
+temporal structure can tell the classes apart. A model that only ever sees one
+frame at a time cannot, since any single frame is just a blob somewhere in the
+image.
 
-## Overview
+## Motion classes
 
-This repository implements a complete pipeline for **action recognition**, covering
-data preprocessing, model training, evaluation, and deployment.
+| label | name       | what the blob does          |
+|-------|------------|-----------------------------|
+| 0     | move_right | travels left to right       |
+| 1     | move_left  | travels right to left       |
+| 2     | move_down  | travels top to bottom       |
+| 3     | circle     | travels around a circle     |
 
-## Features
+Every clip gets a little position jitter and pixel noise so the model has to
+learn the motion pattern instead of memorizing one exact pixel path.
 
-- Clean, modular PyTorch implementation
-- Reproducible experiments with MLflow tracking
-- Comprehensive evaluation with standard benchmarks
-- ONNX export for production deployment
-- Detailed documentation and usage examples
+## Shapes
 
-## Installation
+Clips use the layout `(T, C, H, W)` and batches use `(B, T, C, H, W)`, with
+`C == 3`. The three channels carry the same grayscale signal, so a standard
+three channel model works without changes. Inside the model the batch is
+permuted to `(B, C, T, H, W)` for `Conv3d` and permuted back conceptually when
+the logits come out.
 
-```bash
-git clone https://github.com/YOUR_USERNAME/action-recognition.git
-cd action-recognition
-pip install -r requirements.txt
-```
+## Model
 
-## Quick Start
-
-```python
-from src.model import Model
-from src.trainer import Trainer
-from src.config import Config
-
-config = Config.from_yaml("configs/default.yaml")
-model = Model(config)
-trainer = Trainer(model, config)
-trainer.train()
-```
-
-## Project Structure
-
-```
-action-recognition/
-├── src/
-│   ├── model.py        # Model architecture
-│   ├── dataset.py      # Data loading and preprocessing
-│   ├── trainer.py      # Training loop
-│   ├── evaluate.py     # Evaluation metrics
-│   └── utils.py        # Helper utilities
-├── configs/
-│   └── default.yaml    # Default configuration
-├── notebooks/
-│   └── exploration.ipynb
-├── tests/
-│   └── test_model.py
-├── requirements.txt
-└── README.md
-```
-
-## Results
-
-| Model | Dataset | Metric | Score |
-|-------|---------|--------|-------|
-| Baseline | Standard | Primary | - |
-| Ours | Standard | Primary | - |
+`Action3DCNN` is a compact stack of `Conv3d -> BatchNorm3d -> ReLU` blocks. Each
+block pools over height and width but leaves the time axis intact, so short
+clips do not collapse before the network has looked at the motion. After the
+convolutional stages a single adaptive pool flattens whatever time, height, and
+width remain into one vector, and a linear layer turns that into class logits of
+shape `(B, num_classes)`. The forward pass checks the input rank and channel
+count and raises a clear error when they are wrong.
 
 ## Usage
 
-```bash
-# Train
-python train.py --config configs/default.yaml
+```python
+import torch
+from torch.utils.data import DataLoader
+from src.data import SyntheticMotionDataset, MOTION_CLASSES
+from src.model import Action3DCNN
+from src.train import train_model, evaluate
 
-# Evaluate
-python evaluate.py --checkpoint checkpoints/best.pth
+train_ds = SyntheticMotionDataset(num_samples=256, seed=0)
+test_ds = SyntheticMotionDataset(num_samples=64, seed=123)
+train_loader = DataLoader(train_ds, batch_size=16, shuffle=True)
+test_loader = DataLoader(test_ds, batch_size=16)
 
-# Export to ONNX
-python export.py --checkpoint checkpoints/best.pth
+model = Action3DCNN(num_classes=len(MOTION_CLASSES))
+history = train_model(model, train_loader, epochs=6, lr=1e-3)
+print("final train accuracy:", history["acc"][-1])
+print("test accuracy:", evaluate(model, test_loader))
 ```
 
-## References
+## Tests
 
-- Relevant papers and resources for action recognition
+```
+C:/Users/sharv/.venvs/cv/Scripts/python.exe -m pytest tests/ -q
+```
 
-## License
+The suite covers three things. The data tests confirm clip shape and value
+range, that the three channels stay identical, and that the blob centroid
+actually moves in the direction the label promises. The model tests confirm the
+forward pass returns `(B, num_classes)` logits across several clip lengths and
+spatial sizes, that gradients flow back to the input, and that bad input shapes
+are rejected. The training tests confirm that loss falls over a short run and
+that held out accuracy lands well above chance on the synthetic motion classes.
 
-MIT
+All fifteen tests pass on CPU in a couple of seconds with no downloads.
 
-# update 4
+## Layout
 
-# update 5
-
-# update 8
+```
+src/
+  data.py    synthetic motion clips and a torch Dataset
+  model.py   the 3D CNN action classifier
+  train.py   train loop and accuracy evaluation
+tests/       pytest behavior checks
+```
